@@ -148,3 +148,14 @@ dmypy.json
 
 # Blender backup files
 .blend1
+
+
+weights/
+wandb/
+logs/
+lib/
+benchmark/
+etc/
+*.ckpt
+*.pth
+*.pt

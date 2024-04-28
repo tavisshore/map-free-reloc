@@ -84,6 +84,10 @@ class MapFreeScene(data.Dataset):
                 min_overlap, max_overlap = overlap_limits
                 mask = (overlaps > min_overlap) * (overlaps < max_overlap)
                 idxs = idxs[mask]
+
+                print(idxs)
+                breakpoint()
+
                 return idxs.copy()
         else:
             idxs = np.zeros((len(self.poses) - 1, 4), dtype=np.uint16)

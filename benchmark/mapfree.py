@@ -127,17 +127,13 @@ def main(args):
     dataset_path = args.dataset_path / args.split
     scenes = tuple(f.name for f in dataset_path.iterdir() if f.is_dir())
 
-    try:
-        submission_zip = ZipFile(args.submission_path, 'r')
-    except FileNotFoundError as e:
-        logging.error(f'Could not find ZIP file in path {args.submission_path}')
-        return
+    submission_zip = ZipFile(args.submission_path, 'r')
+    print(f'ready')
 
     all_results = dict()
     all_failures = 0
     for scene in scenes:
-        metrics, failures = compute_scene_metrics(
-            dataset_path, submission_zip, scene)
+        metrics, failures = compute_scene_metrics(dataset_path, submission_zip, scene)
         all_results[scene] = metrics
         all_failures += failures
 
@@ -163,13 +159,13 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         'eval', description='Evaluate submissions for the MapFree dataset benchmark')
-    parser.add_argument('submission_path', type=Path,
+    parser.add_argument('submission_path', type=Path, default=Path('results/submission.zip'),
                         help='Path to the submission ZIP file')
-    parser.add_argument('--split', choices=('val', 'test'), default='test',
+    parser.add_argument('--split', choices=('val', 'test'), default='val',
                         help='Dataset split to use for evaluation. Default: test')
     parser.add_argument('--log', choices=('warning', 'info', 'error'),
                         default='warning', help='Logging level. Default: warning')
-    parser.add_argument('--dataset_path', type=Path, default=None,
+    parser.add_argument('--dataset_path', type=Path, default=Path('data/mapfree'),
                         help='Path to the dataset folder')
 
     args = parser.parse_args()
