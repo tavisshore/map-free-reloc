@@ -41,5 +41,4 @@ if __name__ == '__main__':
     parser.add_argument('--experiment', help='experiment name', default='default')
     parser.add_argument('--resume', help='resume from checkpoint path', default=None)
     args = parser.parse_args([f'config/regression/{stringer}/3d3d.yaml', f'config/{stringer}.yaml', '--experiment', 'default'])
-
     main(args)

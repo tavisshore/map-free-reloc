@@ -11,6 +11,7 @@ from lib.utils.metrics import pose_error_torch, error_auc, A_metrics
 
 from torch.utils.data import DataLoader as DL
 from torchvision.transforms import ColorJitter, Grayscale
+from lib.datasets.sampler import RandomConcatSampler
 from lib.datasets.scannet import ScanNetDataset
 from lib.datasets.sevenscenes import SevenScenesDataset
 from lib.datasets.mapfree import MapFreeDataset
@@ -38,15 +39,25 @@ class RegressionModel(pl.LightningModule):
         datasets = {'ScanNet': ScanNetDataset, '7Scenes': SevenScenesDataset, 'MapFree': MapFreeDataset, 'ggl': GGLDataset}
         self.dataset_type = datasets[cfg.DATASET.DATA_SOURCE]
 
+    def get_sampler(self, dataset, reset_epoch=False):
+        if self.cfg.TRAINING.SAMPLER == 'scene_balance':
+            sampler = RandomConcatSampler(dataset, self.cfg.TRAINING.N_SAMPLES_SCENE, self.cfg.TRAINING.SAMPLE_WITH_REPLACEMENT, 
+                                          shuffle=True, reset_on_iter=reset_epoch)
+        else: sampler = None
+        return sampler
+
     def train_dataloader(self):
         transforms = ColorJitter() if self.cfg.DATASET.AUGMENTATION_TYPE == 'colorjitter' else None
         transforms = Grayscale(num_output_channels=3) if self.cfg.DATASET.BLACK_WHITE else transforms
         dataset = self.dataset_type(self.cfg, 'train', transforms=transforms)
-        return DL(dataset, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS)
+        sampler = self.get_sampler(dataset)
+        return DL(dataset, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler)
 
     def val_dataloader(self):
         dataset = self.dataset_type(self.cfg, 'val')
-        return DL(dataset, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS, drop_last=True)
+        if isinstance(dataset, ScanNetDataset): sampler = self.get_sampler(dataset, reset_epoch=True)
+        else: sampler = None
+        return DL(dataset, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler, drop_last=True)
 
     def test_dataloader(self):
         dataset = self.dataset_type(self.cfg, 'test')
@@ -102,6 +113,31 @@ class RegressionModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
+
+
+        nan_bool = torch.isnan(batch['abs_c_0'])
+        if nan_bool.any():
+            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
+            nan_inds = torch.unique(nan_inds)
+            for k in batch.keys():
+                for n in nan_inds:
+                    if isinstance(batch[k], torch.Tensor):
+                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
+                    elif isinstance(batch[k], list):
+                        batch[k] = batch[k][:n] + batch[k][n+1:]
+
+        nan_bool = torch.isnan(batch['abs_c_1'])
+        if nan_bool.any():
+            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
+            nan_inds = torch.unique(nan_inds)
+            for k in batch.keys():
+                for n in nan_inds:
+                    if isinstance(batch[k], torch.Tensor):
+                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
+                    elif isinstance(batch[k], list):
+                        batch[k] = batch[k][:n] + batch[k][n+1:]
+
+                        
         Tgt = batch['T_0to1']
         R, t = self(batch)
         R_loss, t_loss, loss = self.loss_fn(batch)
