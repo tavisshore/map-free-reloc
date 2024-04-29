@@ -1,5 +1,5 @@
 import torch
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 
 from lib.models.regression.aggregator import *
 from lib.models.regression.head import *
@@ -57,11 +57,11 @@ class RegressionModel(pl.LightningModule):
         dataset = self.dataset_type(self.cfg, 'val')
         if isinstance(dataset, ScanNetDataset): sampler = self.get_sampler(dataset, reset_epoch=True)
         else: sampler = None
-        return DL(dataset, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler, drop_last=True)
+        return DL(dataset, batch_size=8, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler, drop_last=True)
 
     def test_dataloader(self):
         dataset = self.dataset_type(self.cfg, 'test')
-        return DL(dataset, batch_size=1, num_workers=1, shuffle=False)
+        return DL(dataset, batch_size=8, num_workers=1, shuffle=False)
 
     def forward(self, data):
         vol0 = self.encoder(data['image0'])
@@ -114,17 +114,14 @@ class RegressionModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
 
-
         nan_bool = torch.isnan(batch['abs_c_0'])
         if nan_bool.any():
             nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
             nan_inds = torch.unique(nan_inds)
             for k in batch.keys():
                 for n in nan_inds:
-                    if isinstance(batch[k], torch.Tensor):
-                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
-                    elif isinstance(batch[k], list):
-                        batch[k] = batch[k][:n] + batch[k][n+1:]
+                    if isinstance(batch[k], torch.Tensor): batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
+                    elif isinstance(batch[k], list): batch[k] = batch[k][:n] + batch[k][n+1:]
 
         nan_bool = torch.isnan(batch['abs_c_1'])
         if nan_bool.any():

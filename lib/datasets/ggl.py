@@ -3,18 +3,22 @@ import torch
 import torch.utils.data as data
 import numpy as np
 from transforms3d.quaternions import qinverse, qmult, rotate_vector, quat2mat
+import utm 
 
+if __name__ == '__main__':
+    from utils import read_color_image, read_depth_image, correct_intrinsic_scale
+else:
+    from lib.datasets.utils import read_color_image, read_depth_image, correct_intrinsic_scale
 
-from lib.datasets.utils import read_color_image, read_depth_image, correct_intrinsic_scale
-
-# from utils import read_color_image, read_depth_image, correct_intrinsic_scale
-
+def weird_division(n, d):
+    return n / d if d else 0
 
 
 class GGLScene(data.Dataset):
     def __init__(self, scene_root, resize, sample_factor=1, overlap_limits=None, transforms=None,
-                 estimated_depth=None):
+                 estimated_depth=None, stage='train'):
         super().__init__()
+        self.stage = stage
         self.scene_root = Path(scene_root)
         self.resize = resize
         self.sample_factor = sample_factor
@@ -78,20 +82,19 @@ class GGLScene(data.Dataset):
         Returns:
         pairs: nd.array [Npairs, 4], where each column represents seqA, imA, seqB, imB, respectively
         """         
-
         seq_a = [int(fn[-9:-4]) for fn in self.poses.keys() if 'seq0' in fn]
-        seq_b = [int(fn[-9:-4]) for fn in self.poses.keys() if 'seq0' not in fn]
         new_arr = []
-        # seq_a pairs with values within 2 indices of each anchor
-        for i_a, anchor in enumerate(seq_a):
-            a_rems = seq_a[max(0, i_a-2):min(len(seq_a), i_a+3)]
-            a_rems.remove(anchor)
-            for i_an in a_rems:
-                new_arr.append([0, i_a, 0, i_an])
-
-        for i_a, anchor in enumerate(seq_a):
-            for i_bn in seq_b:
-                new_arr.append([0, i_a, 1, i_bn])
+        if self.stage == 'train':
+            for i_a, anchor in enumerate(seq_a):
+                a_rems = seq_a[max(0, i_a-2):min(len(seq_a), i_a+3)]
+                a_rems.remove(anchor)
+                for i_an in a_rems:
+                    new_arr.append([0, i_a, 0, i_an])
+        else:
+            seq_b = [int(fn[-9:-4]) for fn in self.poses.keys() if 'seq0' not in fn]
+            for i_a, anchor in enumerate(seq_a):
+                for i_bn in seq_b:
+                    new_arr.append([0, i_a, 1, i_bn])
 
         new_arr = new_arr[::sample_factor]
 
@@ -143,41 +146,60 @@ class GGLDataset(data.ConcatDataset):
     def __init__(self, cfg, mode, transforms=None):
         assert mode in ['train', 'val', 'test'], 'Invalid dataset mode'
         scenes = cfg.DATASET.SCENES
-        data_root = Path(cfg.DATASET.DATA_ROOT) / mode
+        data_root = Path(cfg.DATASET.DATA_ROOT) / 'train'
         resize = (cfg.DATASET.WIDTH, cfg.DATASET.HEIGHT)
         estimated_depth = cfg.DATASET.ESTIMATED_DEPTH
         overlap_limits = (cfg.DATASET.MIN_OVERLAP_SCORE, cfg.DATASET.MAX_OVERLAP_SCORE)
-        sample_factor = {'train': 1, 'val': 5, 'test': 5}[mode]
+        sample_factor = {'train': 1, 'val': 1, 'test': 5}[mode]
         if scenes is None: scenes = [s.name for s in data_root.iterdir() if s.is_dir()]
 
-        data_srcs = [GGLScene(data_root / scene, resize, sample_factor, overlap_limits, transforms, estimated_depth) for scene in scenes]
+        data_srcs = [GGLScene(data_root / scene, resize, sample_factor, overlap_limits, transforms, estimated_depth, mode) for scene in scenes]
 
         super().__init__(data_srcs)
 
 
+class GraphDataset():
+    def __init__(self, path='data/graphs'):
+        self.cities = [torch.load(str(g)) for g in Path(path).glob('*.pt')]
+
+        self.graph_to_scenes()
+
+        
+    def graph_to_scenes(self):
+        scenes = []
+        for graph in self.cities:
+            for e in graph.edges:
+                if len(graph.edges[e]['images']) > 2:
+                    node_a_x, node_a_y = utm.from_latlon(*graph.edges[e]['images'][0]['point'])[:2]
+                    node_b_x, node_b_y = utm.from_latlon(*graph.edges[e]['images'][-1]['point'])[:2]
+
+                    node_b_x = abs(node_b_x - node_a_x)
+                    node_b_y = abs(node_b_y - node_a_y)
+
+                    if node_b_x and node_b_y:
+                        sub_nodes = graph.edges[e]['images']
+                        scene = {'images': [], 'pos_x': [], 'pos_y': []}
+
+                        # Reference nodes
+                        for node in sub_nodes:
+                            n_pos = np.subtract(utm.from_latlon(*node['point'])[:2], (node_a_x, node_a_y))
+                            rel_pos_x = abs(round(weird_division(n_pos[0], node_b_x), 8))
+                            rel_pos_y = abs(round(weird_division(n_pos[1], node_b_y), 8))
+                            node_image = f'{node["point"]}_{node["north"]}'
+                            scene['images'].append(node_image), scene['pos_x'].append(rel_pos_x), scene['pos_y'].append(rel_pos_y)
+
+                        query = graph.edges[e]['query']
+                        query_pos = np.subtract(utm.from_latlon(*query['point'])[:2], (node_a_x, node_a_y))
+                        rel_pos_x = abs(round(weird_division(query_pos[0], node_b_x), 8))
+                        rel_pos_y = abs(round(weird_division(query_pos[1], node_b_y), 8))
+                        query_image = f'{query["point"]}_{query["north"]}'
+                        scene['query'] = {'image': query_image, 'pos_x': rel_pos_x, 'pos_y': rel_pos_y}                        
+                        scenes.append(scene)
+
+
+
+        print(len(scenes))
+
+
 if __name__ == '__main__':
-    import argparse
-    from time import sleep
-    from default import cfg
-    torch.set_printoptions(linewidth=200)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('config', default='config/regression/ggl/3d3d.yaml', help='path to config file')
-    parser.add_argument('dataset_config', default='config/ggl.yaml', help='path to dataset config file')
-    parser.add_argument('--experiment', help='experiment name', default='default')
-    parser.add_argument('--resume', help='resume from checkpoint path', default=None)
-    args = parser.parse_args(['config/regression/ggl/3d3d.yaml', 'config/ggl.yaml', '--experiment', 'default'])
-    cfg.merge_from_file(args.dataset_config)
-    cfg.merge_from_file(args.config)
-
-    dataset = GGLDataset(cfg, 'train')
-
-    for i in range(0,100):    
-        item = dataset[i]   
-        for k in item.keys():
-            if 'image' in k:
-                print(f'{k}: {item[k].shape}')
-            elif 'depth' not in k:
-                print(f'{k}: {item[k]}')
-        print()
-        sleep(2)
+    data = GraphDataset()

@@ -6,8 +6,8 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"  # noqa: E402
 os.environ["OMP_NUM_THREADS"] = "1"  # noqa: E402
 os.environ["OPENBLAS_NUM_THREADS"] = "1"  # noqa: E402
 
-import pytorch_lightning as pl
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+import lightning.pytorch as pl
+from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 
 from config.default import cfg
 from lib.datasets.datamodules import DataModule
