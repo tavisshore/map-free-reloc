@@ -161,18 +161,16 @@ class GGLDataset(data.ConcatDataset):
 class GraphDataset():
     def __init__(self, path='data/graphs'):
         self.cities = [torch.load(str(g)) for g in Path(path).glob('*.pt')]
-
         self.graph_to_scenes()
+        self.load_pairs()
 
-        
     def graph_to_scenes(self):
-        scenes = []
+        self.scenes = {}
         for graph in self.cities:
             for e in graph.edges:
-                if len(graph.edges[e]['images']) > 2:
+                if len(graph.edges[e]['images']) > 2: # edges have images within
                     node_a_x, node_a_y = utm.from_latlon(*graph.edges[e]['images'][0]['point'])[:2]
                     node_b_x, node_b_y = utm.from_latlon(*graph.edges[e]['images'][-1]['point'])[:2]
-
                     node_b_x = abs(node_b_x - node_a_x)
                     node_b_y = abs(node_b_y - node_a_y)
 
@@ -180,7 +178,6 @@ class GraphDataset():
                         sub_nodes = graph.edges[e]['images']
                         scene = {'images': [], 'pos_x': [], 'pos_y': []}
 
-                        # Reference nodes
                         for node in sub_nodes:
                             n_pos = np.subtract(utm.from_latlon(*node['point'])[:2], (node_a_x, node_a_y))
                             rel_pos_x = abs(round(weird_division(n_pos[0], node_b_x), 8))
@@ -194,11 +191,30 @@ class GraphDataset():
                         rel_pos_y = abs(round(weird_division(query_pos[1], node_b_y), 8))
                         query_image = f'{query["point"]}_{query["north"]}'
                         scene['query'] = {'image': query_image, 'pos_x': rel_pos_x, 'pos_y': rel_pos_y}                        
-                        scenes.append(scene)
+                        self.scenes[e] = scene
+
+    def load_pairs(self):
+        self.train_pairs = [] # ATM - from self.scenes, {scene, indices}
+        for s in self.scenes:
+            imgs = self.scenes[s]['images']
+            len_img = len(imgs)
+            scene_imgs = []
+            for i_a, img in enumerate(self.scenes[s]['images']):
+                # train_pairs.append([scene, i, scene, i+1])
+                a_rems = imgs[max(0, i_a-2):min(len_img, i_a+3)]
+                a_rems.remove(img)
+                for i_an in a_rems:
+                    scene_imgs.append([i_a, i_an])
+            self.train_pairs.append({s: scene_imgs})
+            
 
 
+        # else:
+        #     seq_b = [int(fn[-9:-4]) for fn in self.poses.keys() if 'seq0' not in fn]
+        #     for i_a, anchor in enumerate(seq_a):
+        #         for i_bn in seq_b:
+        #             new_arr.append([0, i_a, 1, i_bn])
 
-        print(len(scenes))
 
 
 if __name__ == '__main__':
