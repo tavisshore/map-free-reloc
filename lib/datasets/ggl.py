@@ -224,7 +224,7 @@ class GraphDataset():
                 a_rems.remove(img)
                 for i_an in a_rems:
                     self.train_pairs.append({'scene': s, 'imgs': [imgs.index(img), imgs.index(i_an)], 'heading': edge_angle})
-
+                self.val_pairs.append({'scene': s, 'imgs': [imgs.index(img)], 'heading': edge_angle})
 
 class GraphPoseDataset(data.Dataset):
     def __init__(self, stage='train', dataset: GraphDataset = None) -> None:
@@ -239,7 +239,7 @@ class GraphPoseDataset(data.Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    def __getitem__(self, index):
+    def get_train_item(self, index):
         pair = self.pairs[index]
         scene = self.dataset.scenes[pair['scene']]
         indices = pair['imgs']
@@ -286,12 +286,68 @@ class GraphPoseDataset(data.Dataset):
         T = torch.from_numpy(T)
 
         return {'image0': image1, 'depth0': torch.tensor([]), 'image1': image2, 'depth1': torch.tensor([]), 'T_0to1': T, 'abs_q_0': q1, 
-                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2} #, 'K_color0': self.K[im1_path].copy(), 'K_color1': self.K[im2_path].copy(), 
-                # 'dataset_name': 'GGL', 'scene_id': self.scene_root.stem, 'scene_root': str(self.scene_root), 
-                # 'pair_id': index*self.sample_factor, 'pair_names': (im1_path, im2_path), 'sim': 0.}
+                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2} 
 
+    def get_val_item(self, index):
+        pair = self.pairs[index]
+        scene = self.dataset.scenes[pair['scene']]
+        indices = pair['imgs']
+        heading = pair['heading']
+        query = scene['query']
+        query_north = float(query['image'].split('_')[-1])
+        image_query = np.array(self.dataset.lmdb[query['image']].convert('RGB'))
+        image_ref = np.array(self.dataset.lmdb[scene['images'][indices[0]]].convert('RGB'))
+        # Heading Roll
+
+        _, width = image_query.shape[:2]
+        query_north = int((query_north / 360) * width)
+        anchor_angle = int((heading / 360) * width)
+        image_query = np.roll(image_query, query_north, axis=1)
+        image_query = np.roll(image_query, -anchor_angle, axis=1)
+
+        ref_north = scene['norths'][indices[0]]
+        _, width = image_query.shape[:2]
+        ref_north = int((ref_north / 360) * width)
+        anchor_angle = int((heading / 360) * width)
+        image_ref = np.roll(image_ref, ref_north, axis=1)
+        image_ref = np.roll(image_ref, -anchor_angle, axis=1)
+
+
+        # FOV Crop
+        new_half_width = int((width * (self.dataset.fov/360))/2)
+        image_query = image_query[:, (width//2)-new_half_width:(width//2)+new_half_width]
+        image_ref = image_ref[:, (width//2)-new_half_width:(width//2)+new_half_width]
+
+        image1 = self.normalise(image_query)
+        image2 = self.normalise(image_ref)
+
+        pos_x_1 = query['pos_x']
+        pos_y_1 = query['pos_y']
+        pos_x_2 = scene['pos_x'][indices[0]]
+        pos_y_2 = scene['pos_y'][indices[0]]
+        t1 = torch.tensor([pos_x_1, pos_y_1, 0], dtype=torch.float32)
+        q1 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+        t2 = torch.tensor([pos_x_2, pos_y_2, 0], dtype=torch.float32)
+        q2 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+        # From works code
+        c1 = rotate_vector(-t1, qinverse(q1))  # center of camera 1 in world coordinates)
+        c2 = rotate_vector(-t2, qinverse(q2))  # center of camera 2 in world coordinates)
+        q12 = qmult(q2, qinverse(q1))
+        t12 = t2 - rotate_vector(t1, q12)
+        T = np.eye(4, dtype=np.float32)
+        T[:3, :3] = quat2mat(q12)
+        T[:3, -1] = t12
+        T = torch.from_numpy(T)
+
+        return {'image0': image1, 'depth0': torch.tensor([]), 'image1': image2, 'depth1': torch.tensor([]), 'T_0to1': T, 'abs_q_0': q1, 
+                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2} 
+
+    def __getitem__(self, index):
+        if self.stage == 'train': return self.get_train_item(index)
+        else: return self.get_val_item(index)
 
 
 if __name__ == '__main__':
-    d = GraphPoseDataset()
+    dat = GraphDataset()
+    d = GraphPoseDataset(stage='val', dataset=dat)
     item = d.__getitem__(0)
