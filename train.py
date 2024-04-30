@@ -7,12 +7,13 @@ os.environ["OMP_NUM_THREADS"] = "1"  # noqa: E402
 os.environ["OPENBLAS_NUM_THREADS"] = "1"  # noqa: E402
 
 import lightning.pytorch as pl
-from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
-
+from lightning.pytorch.loggers import WandbLogger
+import torch
 from config.default import cfg
-from lib.datasets.datamodules import DataModule
-from lib.models.regression.model import RegressionModel
 
+
+# from lib.models.regression.model import RegressionModel
+from lib.models.regression.model_copy import RegressionModel
 
 def main(args):
     cfg.merge_from_file(args.dataset_config)
@@ -27,11 +28,16 @@ def main(args):
 
     trainer = pl.Trainer(devices=1, check_val_every_n_epoch=1, max_epochs=cfg.TRAINING.EPOCHS, logger=[wandb_logger], 
                          callbacks=[checkpoint_callback, lr_monitoring_callback, epochend_callback], num_sanity_val_steps=0, 
-                         gradient_clip_val=cfg.TRAINING.GRAD_CLIP)
+                         gradient_clip_val=cfg.TRAINING.GRAD_CLIP,
+                         overfit_batches=4)
     trainer.fit(model, ckpt_path=args.resume)
 
 
 if __name__ == '__main__':
+    torch.set_float32_matmul_precision('high')
+    pl.seed_everything(42)
+
+
     stringer = 'ggl'
     parser = argparse.ArgumentParser()
     parser.add_argument('config', default=f'config/regression/{stringer}/3d3d.yaml', help='path to config file')

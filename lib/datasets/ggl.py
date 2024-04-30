@@ -30,10 +30,11 @@ def calculate_initial_compass_bearing(start, end):
 
 
 class GGLScene(data.Dataset):
-    def __init__(self, scene_root, resize, sample_factor=1, overlap_limits=None, transforms=None,
+    def __init__(self, scene_root, scene, resize, sample_factor=1, overlap_limits=None, transforms=None,
                  estimated_depth=None, stage='train'):
         super().__init__()
         self.stage = stage
+        self.scene = scene
         self.scene_root = Path(scene_root)
         self.resize = resize
         self.sample_factor = sample_factor
@@ -123,7 +124,8 @@ class GGLScene(data.Dataset):
         return len(self.pairs)
 
     def __getitem__(self, index):
-        im1_path, im2_path = self.get_pair_path(self.pairs[index])
+        pairs = self.pairs[index]
+        im1_path, im2_path = self.get_pair_path(pairs)
         image1 = read_color_image(self.scene_root / im1_path, self.resize, augment_fn=self.transforms)
         image2 = read_color_image(self.scene_root / im2_path, self.resize, augment_fn=self.transforms)
 
@@ -151,10 +153,12 @@ class GGLScene(data.Dataset):
         T[:3, :3] = quat2mat(q12)
         T[:3, -1] = t12
         T = torch.from_numpy(T)
+
+
         return {'image0': image1, 'depth0': depth1, 'image1': image2, 'depth1': depth2, 'T_0to1': T, 'abs_q_0': q1, 
                 'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 'K_color0': self.K[im1_path].copy(), 'K_color1': self.K[im2_path].copy(), 
                 'dataset_name': 'GGL', 'scene_id': self.scene_root.stem, 'scene_root': str(self.scene_root), 
-                'pair_id': index*self.sample_factor, 'pair_names': (im1_path, im2_path), 'sim': 0.}
+                'pair_id': index*self.sample_factor, 'pair_names': (im1_path, im2_path), 'sim': 0., 'scene': self.scene, 'inds': pairs}
 
 
 class GGLDataset(data.ConcatDataset):
@@ -168,7 +172,7 @@ class GGLDataset(data.ConcatDataset):
         sample_factor = {'train': 1, 'val': 1, 'test': 5}[mode]
         if scenes is None: scenes = [s.name for s in data_root.iterdir() if s.is_dir()]
 
-        data_srcs = [GGLScene(data_root / scene, resize, sample_factor, overlap_limits, transforms, estimated_depth, mode) for scene in scenes]
+        data_srcs = [GGLScene(data_root / scene, scene, resize, sample_factor, overlap_limits, transforms, estimated_depth, mode) for scene in scenes]
 
         super().__init__(data_srcs)
 
@@ -234,7 +238,7 @@ class GraphPoseDataset(data.Dataset):
 
         resize = (dataset.cfg.DATASET.WIDTH, dataset.cfg.DATASET.HEIGHT)
 
-        self.normalise = Compose([ToTensor(), Resize(resize), Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+        self.normalise = Compose([ToTensor(), Resize(resize)])#, Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
         if stage == 'train': self.pairs = self.dataset.train_pairs
         else: self.pairs = self.dataset.val_pairs
 
@@ -246,7 +250,7 @@ class GraphPoseDataset(data.Dataset):
         scene = self.dataset.scenes[pair['scene']]
         indices = pair['imgs']
         heading = pair['heading']
-        image_query = np.array(self.dataset.lmdb[scene['images'][indices[0]]].convert('RGB'))
+        image_query = np.array(self.dataset.lmdb[scene['images'][indices[0]]].convert('RGB')) # Query, Ref
         image_ref = np.array(self.dataset.lmdb[scene['images'][indices[1]]].convert('RGB'))
         # Heading Roll
         query_north = scene['norths'][indices[0]]
@@ -287,8 +291,13 @@ class GraphPoseDataset(data.Dataset):
         T[:3, -1] = t12
         T = torch.from_numpy(T)
 
+
+        # Extra - 590.3821 590.3821 1024 256 512 512
+        # K = np.array([[590.3821, 0, 1024], [0, 590.3821, 256], [0, 0, 1]], dtype=np.float32)
+        K = np.array([[295.191, 0., 511.75], [0., 295.191, 127.75], [0., 0., 1.]], dtype=np.float32) # ESTIMATED
+
         return {'image0': image1, 'depth0': torch.tensor([]), 'image1': image2, 'depth1': torch.tensor([]), 'T_0to1': T, 'abs_q_0': q1, 
-                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2} 
+                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 'K_color0': K, 'K_color1': K, 'scene': pair['scene'], 'pair': pair['imgs']} 
 
     def get_val_item(self, index):
         pair = self.pairs[index]
@@ -313,7 +322,6 @@ class GraphPoseDataset(data.Dataset):
         anchor_angle = int((heading / 360) * width)
         image_ref = np.roll(image_ref, ref_north, axis=1)
         image_ref = np.roll(image_ref, -anchor_angle, axis=1)
-
 
         # FOV Crop
         new_half_width = int((width * (self.dataset.fov/360))/2)
@@ -341,8 +349,10 @@ class GraphPoseDataset(data.Dataset):
         T[:3, -1] = t12
         T = torch.from_numpy(T)
 
+        K = np.array([[295.191, 0., 511.75], [0., 295.191, 127.75], [0., 0., 1.]], dtype=np.float32) # ESTIMATED
+
         return {'image0': image1, 'depth0': torch.tensor([]), 'image1': image2, 'depth1': torch.tensor([]), 'T_0to1': T, 'abs_q_0': q1, 
-                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2} 
+                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 'K_color0': K, 'K_color1': K, 'scene': pair['scene'], 'pair': pair['imgs']} 
 
     def __getitem__(self, index):
         if self.stage == 'train': return self.get_train_item(index)

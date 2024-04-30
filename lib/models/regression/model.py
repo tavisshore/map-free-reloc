@@ -5,12 +5,13 @@ from lib.models.regression.aggregator import *
 from lib.models.regression.head import *
 from lib.models.regression.encoder.resnet import ResNet
 from lib.models.regression.encoder.resunet import ResUNet
+from lib.datasets.sampler import RandomConcatSampler
 
 from lib.utils.loss import *
 from lib.utils.metrics import pose_error_torch, error_auc, A_metrics
 
 from torch.utils.data import DataLoader as DL
-from lib.datasets.ggl import GraphDataset, GraphPoseDataset #GGLDataset
+from lib.datasets.ggl import GraphDataset, GraphPoseDataset 
 
 
 class RegressionModel(pl.LightningModule):
@@ -26,15 +27,12 @@ class RegressionModel(pl.LightningModule):
         self.rot_loss = eval(cfg.TRAINING.ROT_LOSS)
         self.trans_loss = eval(cfg.TRAINING.TRANS_LOSS)
         self.LAMBDA = cfg.TRAINING.LAMBDA
-        if cfg.TRAINING.LAMBDA == 0.:
-            self.s_r = torch.nn.Parameter(torch.zeros(1))
-            self.s_t = torch.nn.Parameter(torch.zeros(1))
-
         self.dataset = GraphDataset(cfg)
+        self.val_outputs = []
 
     def train_dataloader(self):
         train_data = GraphPoseDataset(stage='train', dataset=self.dataset)
-        return DL(train_data, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS)
+        return DL(train_data, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS, shuffle=True)
 
     def val_dataloader(self):
         val_data = GraphPoseDataset(stage='val', dataset=self.dataset)
@@ -60,45 +58,35 @@ class RegressionModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         self(batch)
         R_loss, t_loss, loss = self.loss_fn(batch)
-        self.log('train/R_loss', R_loss), self.log('train/t_loss', t_loss), self.log('train/loss', loss)
+        self.log('train/R_loss', R_loss), self.log('train/t_loss', t_loss), self.log('train/loss', loss, prog_bar=True)
         if self.LAMBDA == 0.: self.log('train/s_R', self.s_r), self.log('train/s_t', self.s_t)
         return loss
 
-    def validation_step(self, batch, batch_idx):
-
-        nan_bool = torch.isnan(batch['abs_c_0'])
-        if nan_bool.any():
-            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
-            nan_inds = torch.unique(nan_inds)
-            for k in batch.keys():
-                for n in nan_inds:
-                    if isinstance(batch[k], torch.Tensor): batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
-                    elif isinstance(batch[k], list): batch[k] = batch[k][:n] + batch[k][n+1:]
-
-        nan_bool = torch.isnan(batch['abs_c_1'])
-        if nan_bool.any():
-            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
-            nan_inds = torch.unique(nan_inds)
-            for k in batch.keys():
-                for n in nan_inds:
-                    if isinstance(batch[k], torch.Tensor):
-                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
-                    elif isinstance(batch[k], list):
-                        batch[k] = batch[k][:n] + batch[k][n+1:]
-
-                        
+    def validation_step(self, batch, batch_idx):          
         Tgt = batch['T_0to1']
+        print(batch)
+        print(Tgt) # add difference in pose to output dict - maybe just t_loss too, per item per scene.
+        breakpoint()
+        
+
         R, t = self(batch)
         R_loss, t_loss, loss = self.loss_fn(batch)
         outputs = pose_error_torch(R, t, Tgt, reduce=None)
         outputs['R_loss'] = R_loss
         outputs['t_loss'] = t_loss
         outputs['loss'] = loss
+        outputs['scene'] = batch['scene']
+        outputs['indices'] = batch['pair']
+
+
+        self.val_outputs.append(outputs)
         return outputs
 
-    def on_validation_epoch_end(self, outputs):
+
+    def on_validation_epoch_end(self):
         aggregated = {}
-        for key in outputs[0].keys(): aggregated[key] = torch.stack([x[key] for x in outputs])
+        for key in self.val_outputs[0].keys(): 
+            aggregated[key] = torch.stack([x[key] for x in self.val_outputs])
 
         median_t_ang_err = aggregated['t_err_ang'].median()
         median_t_scale_err = aggregated['t_err_scale'].median()
@@ -148,6 +136,7 @@ class RegressionModel(pl.LightningModule):
         self.log('val_t_scale/a1', a1)
         self.log('val_t_scale/a2', a2)
         self.log('val_t_scale/a3', a3)
+        self.val_outputs.clear()
         return mean_loss
 
     def configure_optimizers(self):
