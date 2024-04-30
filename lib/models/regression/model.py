@@ -10,11 +10,6 @@ from lib.utils.loss import *
 from lib.utils.metrics import pose_error_torch, error_auc, A_metrics
 
 from torch.utils.data import DataLoader as DL
-from torchvision.transforms import ColorJitter, Grayscale
-from lib.datasets.sampler import RandomConcatSampler
-from lib.datasets.scannet import ScanNetDataset
-from lib.datasets.sevenscenes import SevenScenesDataset
-from lib.datasets.mapfree import MapFreeDataset
 from lib.datasets.ggl import GraphDataset, GraphPoseDataset #GGLDataset
 
 
@@ -35,18 +30,7 @@ class RegressionModel(pl.LightningModule):
             self.s_r = torch.nn.Parameter(torch.zeros(1))
             self.s_t = torch.nn.Parameter(torch.zeros(1))
 
-        # DATA
-        # datasets = {'ScanNet': ScanNetDataset, '7Scenes': SevenScenesDataset, 'MapFree': MapFreeDataset, 'ggl': GGLDataset}
-        # self.dataset_type = datasets[cfg.DATASET.DATA_SOURCE]
         self.dataset = GraphDataset()
-
-
-    def get_sampler(self, dataset, reset_epoch=False):
-        if self.cfg.TRAINING.SAMPLER == 'scene_balance':
-            sampler = RandomConcatSampler(dataset, self.cfg.TRAINING.N_SAMPLES_SCENE, self.cfg.TRAINING.SAMPLE_WITH_REPLACEMENT, 
-                                          shuffle=True, reset_on_iter=reset_epoch)
-        else: sampler = None
-        return sampler
 
     def train_dataloader(self):
         train_data = GraphPoseDataset(stage='train', dataset=self.dataset)
@@ -74,9 +58,6 @@ class RegressionModel(pl.LightningModule):
         return R_loss, t_loss, loss
 
     def training_step(self, batch, batch_idx):
-        # batch keys: 'image0', 'depth0', 'image1', 'depth1', 'T_0to1', 'abs_q_0', 'abs_c_0', 'abs_q_1', 'abs_c_1', 
-        # 'K_color0', 'K_color1', 'dataset_name', 'scene_id', 'scene_root', 'pair_id', 'pair_names', 'sim'
-
         self(batch)
         R_loss, t_loss, loss = self.loss_fn(batch)
         self.log('train/R_loss', R_loss), self.log('train/t_loss', t_loss), self.log('train/loss', loss)
