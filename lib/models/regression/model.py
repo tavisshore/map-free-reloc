@@ -30,7 +30,7 @@ class RegressionModel(pl.LightningModule):
             self.s_r = torch.nn.Parameter(torch.zeros(1))
             self.s_t = torch.nn.Parameter(torch.zeros(1))
 
-        self.dataset = GraphDataset()
+        self.dataset = GraphDataset(cfg)
 
     def train_dataloader(self):
         train_data = GraphPoseDataset(stage='train', dataset=self.dataset)

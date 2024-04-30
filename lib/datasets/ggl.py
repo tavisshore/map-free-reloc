@@ -174,13 +174,13 @@ class GGLDataset(data.ConcatDataset):
 
 
 class GraphDataset():
-    def __init__(self, path: Path = Path('data')):
+    def __init__(self, cfg=None, path: Path = Path('data')):
         self.cities = [torch.load(str(g)) for g in Path(path / 'graphs').glob('*.pt')]
         self.graph_to_scenes()
         self.load_pairs()
         self.lmdb = ImageDatabase(path / 'lmdb')
         self.fov = 90
-        self.img_dim = (256, 256)
+        self.cfg = cfg
 
     def graph_to_scenes(self):
         self.scenes = {}
@@ -231,8 +231,10 @@ class GraphPoseDataset(data.Dataset):
         super().__init__()
         self.stage = stage
         self.dataset = dataset
-        self.transforms = None
-        self.normalise = Compose([ToTensor(), Resize(self.dataset.img_dim), Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+
+        resize = (dataset.cfg.DATASET.WIDTH, dataset.cfg.DATASET.HEIGHT)
+
+        self.normalise = Compose([ToTensor(), Resize(resize), Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
         if stage == 'train': self.pairs = self.dataset.train_pairs
         else: self.pairs = self.dataset.val_pairs
 
