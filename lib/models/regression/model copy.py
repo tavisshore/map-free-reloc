@@ -15,7 +15,7 @@ from lib.datasets.sampler import RandomConcatSampler
 from lib.datasets.scannet import ScanNetDataset
 from lib.datasets.sevenscenes import SevenScenesDataset
 from lib.datasets.mapfree import MapFreeDataset
-from lib.datasets.ggl import GraphDataset, GraphPoseDataset #GGLDataset
+from lib.datasets.ggl import GGLDataset
 
 
 class RegressionModel(pl.LightningModule):
@@ -36,10 +36,8 @@ class RegressionModel(pl.LightningModule):
             self.s_t = torch.nn.Parameter(torch.zeros(1))
 
         # DATA
-        # datasets = {'ScanNet': ScanNetDataset, '7Scenes': SevenScenesDataset, 'MapFree': MapFreeDataset, 'ggl': GGLDataset}
-        # self.dataset_type = datasets[cfg.DATASET.DATA_SOURCE]
-        self.dataset = GraphDataset()
-
+        datasets = {'ScanNet': ScanNetDataset, '7Scenes': SevenScenesDataset, 'MapFree': MapFreeDataset, 'ggl': GGLDataset}
+        self.dataset_type = datasets[cfg.DATASET.DATA_SOURCE]
 
     def get_sampler(self, dataset, reset_epoch=False):
         if self.cfg.TRAINING.SAMPLER == 'scene_balance':
@@ -49,12 +47,21 @@ class RegressionModel(pl.LightningModule):
         return sampler
 
     def train_dataloader(self):
-        train_data = GraphPoseDataset(stage='train', dataset=self.dataset)
-        return DL(train_data, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS)
+        transforms = ColorJitter() if self.cfg.DATASET.AUGMENTATION_TYPE == 'colorjitter' else None
+        transforms = Grayscale(num_output_channels=3) if self.cfg.DATASET.BLACK_WHITE else transforms
+        dataset = self.dataset_type(self.cfg, 'train', transforms=transforms)
+        sampler = self.get_sampler(dataset)
+        return DL(dataset, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler)
 
     def val_dataloader(self):
-        val_data = GraphPoseDataset(stage='val', dataset=self.dataset)
-        return DL(val_data, batch_size=8, num_workers=self.cfg.TRAINING.NUM_WORKERS, drop_last=True)
+        dataset = self.dataset_type(self.cfg, 'val')
+        if isinstance(dataset, ScanNetDataset): sampler = self.get_sampler(dataset, reset_epoch=True)
+        else: sampler = None
+        return DL(dataset, batch_size=8, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler, drop_last=True)
+
+    def test_dataloader(self):
+        dataset = self.dataset_type(self.cfg, 'test')
+        return DL(dataset, batch_size=8, num_workers=1, shuffle=False)
 
     def forward(self, data):
         vol0 = self.encoder(data['image0'])
@@ -76,6 +83,28 @@ class RegressionModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # batch keys: 'image0', 'depth0', 'image1', 'depth1', 'T_0to1', 'abs_q_0', 'abs_c_0', 'abs_q_1', 'abs_c_1', 
         # 'K_color0', 'K_color1', 'dataset_name', 'scene_id', 'scene_root', 'pair_id', 'pair_names', 'sim'
+
+        nan_bool = torch.isnan(batch['abs_c_0'])
+        if nan_bool.any():
+            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
+            nan_inds = torch.unique(nan_inds)
+            for k in batch.keys():
+                for n in nan_inds:
+                    if isinstance(batch[k], torch.Tensor):
+                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
+                    elif isinstance(batch[k], list):
+                        batch[k] = batch[k][:n] + batch[k][n+1:]
+
+        nan_bool = torch.isnan(batch['abs_c_1'])
+        if nan_bool.any():
+            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
+            nan_inds = torch.unique(nan_inds)
+            for k in batch.keys():
+                for n in nan_inds:
+                    if isinstance(batch[k], torch.Tensor):
+                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
+                    elif isinstance(batch[k], list):
+                        batch[k] = batch[k][:n] + batch[k][n+1:]
 
         self(batch)
         R_loss, t_loss, loss = self.loss_fn(batch)
@@ -115,7 +144,7 @@ class RegressionModel(pl.LightningModule):
         outputs['loss'] = loss
         return outputs
 
-    def on_validation_epoch_end(self, outputs):
+    def validation_epoch_end(self, outputs):
         aggregated = {}
         for key in outputs[0].keys(): aggregated[key] = torch.stack([x[key] for x in outputs])
 

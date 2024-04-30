@@ -227,10 +227,10 @@ class GraphDataset():
 
 
 class GraphPoseDataset(data.Dataset):
-    def __init__(self, stage='train') -> None:
+    def __init__(self, stage='train', dataset: GraphDataset = None) -> None:
         super().__init__()
         self.stage = stage
-        self.dataset = GraphDataset()
+        self.dataset = dataset
         self.transforms = None
         self.normalise = Compose([ToTensor(), Resize(self.dataset.img_dim), Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
         if stage == 'train': self.pairs = self.dataset.train_pairs
@@ -264,16 +264,31 @@ class GraphPoseDataset(data.Dataset):
         image_query = image_query[:, (width//2)-new_half_width:(width//2)+new_half_width]
         image_ref = image_ref[:, (width//2)-new_half_width:(width//2)+new_half_width]
 
-        image_query = self.normalise(image_query)
-        image_ref = self.normalise(image_ref)
+        image1 = self.normalise(image_query)
+        image2 = self.normalise(image_ref)
 
-        pos_x = scene['pos_x'][indices[0]]
-        pos_y = scene['pos_y'][indices[0]]
-        pose_trans = torch.tensor([pos_x, pos_y, 0], dtype=torch.float32)
-        pose_quart = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+        pos_x_1 = scene['pos_x'][indices[0]]
+        pos_y_1 = scene['pos_y'][indices[0]]
+        pos_x_2 = scene['pos_x'][indices[1]]
+        pos_y_2 = scene['pos_y'][indices[1]]
+        t1 = torch.tensor([pos_x_1, pos_y_1, 0], dtype=torch.float32)
+        q1 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+        t2 = torch.tensor([pos_x_2, pos_y_2, 0], dtype=torch.float32)
+        q2 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+        # From works code
+        c1 = rotate_vector(-t1, qinverse(q1))  # center of camera 1 in world coordinates)
+        c2 = rotate_vector(-t2, qinverse(q2))  # center of camera 2 in world coordinates)
+        q12 = qmult(q2, qinverse(q1))
+        t12 = t2 - rotate_vector(t1, q12)
+        T = np.eye(4, dtype=np.float32)
+        T[:3, :3] = quat2mat(q12)
+        T[:3, -1] = t12
+        T = torch.from_numpy(T)
 
-        return {'image0': image_query, 'image1': image_ref, 'trans': pose_trans, 'quart': pose_quart}
-
+        return {'image0': image1, 'depth0': torch.tensor([]), 'image1': image2, 'depth1': torch.tensor([]), 'T_0to1': T, 'abs_q_0': q1, 
+                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2} #, 'K_color0': self.K[im1_path].copy(), 'K_color1': self.K[im2_path].copy(), 
+                # 'dataset_name': 'GGL', 'scene_id': self.scene_root.stem, 'scene_root': str(self.scene_root), 
+                # 'pair_id': index*self.sample_factor, 'pair_names': (im1_path, im2_path), 'sim': 0.}
 
 
 
