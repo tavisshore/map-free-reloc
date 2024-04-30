@@ -4,14 +4,29 @@ import torch.utils.data as data
 import numpy as np
 from transforms3d.quaternions import qinverse, qmult, rotate_vector, quat2mat
 import utm 
+import math
+from torchvision.transforms import Compose, ToTensor, Resize, Normalize
 
 if __name__ == '__main__':
     from utils import read_color_image, read_depth_image, correct_intrinsic_scale
+    from database import ImageDatabase
 else:
     from lib.datasets.utils import read_color_image, read_depth_image, correct_intrinsic_scale
+    from lib.datasets.database import ImageDatabase
 
 def weird_division(n, d):
     return n / d if d else 0
+
+def calculate_initial_compass_bearing(start, end):
+    lat1 = math.radians(start[0])
+    lat2 = math.radians(end[0])
+    diffLong = math.radians(end[1] - start[1])
+    x = math.sin(diffLong) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(diffLong))
+    initial_bearing = math.atan2(x, y)
+    initial_bearing = math.degrees(initial_bearing)
+    compass_bearing = (initial_bearing + 360) % 360
+    return round(compass_bearing, 3)
 
 
 class GGLScene(data.Dataset):
@@ -159,14 +174,17 @@ class GGLDataset(data.ConcatDataset):
 
 
 class GraphDataset():
-    def __init__(self, path='data/graphs'):
-        self.cities = [torch.load(str(g)) for g in Path(path).glob('*.pt')]
+    def __init__(self, path: Path = Path('data')):
+        self.cities = [torch.load(str(g)) for g in Path(path / 'graphs').glob('*.pt')]
         self.graph_to_scenes()
         self.load_pairs()
+        self.lmdb = ImageDatabase(path / 'lmdb')
+        self.fov = 90
+        self.img_dim = (256, 256)
 
     def graph_to_scenes(self):
         self.scenes = {}
-        for graph in self.cities:
+        for g_idx, graph in enumerate(self.cities):
             for e in graph.edges:
                 if len(graph.edges[e]['images']) > 2: # edges have images within
                     node_a_x, node_a_y = utm.from_latlon(*graph.edges[e]['images'][0]['point'])[:2]
@@ -176,7 +194,7 @@ class GraphDataset():
 
                     if node_b_x and node_b_y:
                         sub_nodes = graph.edges[e]['images']
-                        scene = {'images': [], 'pos_x': [], 'pos_y': []}
+                        scene = {'images': [], 'norths': [], 'pos_x': [], 'pos_y': []}
 
                         for node in sub_nodes:
                             n_pos = np.subtract(utm.from_latlon(*node['point'])[:2], (node_a_x, node_a_y))
@@ -184,38 +202,81 @@ class GraphDataset():
                             rel_pos_y = abs(round(weird_division(n_pos[1], node_b_y), 8))
                             node_image = f'{node["point"]}_{node["north"]}'
                             scene['images'].append(node_image), scene['pos_x'].append(rel_pos_x), scene['pos_y'].append(rel_pos_y)
-
+                            scene['norths'].append(node['north'])
                         query = graph.edges[e]['query']
                         query_pos = np.subtract(utm.from_latlon(*query['point'])[:2], (node_a_x, node_a_y))
                         rel_pos_x = abs(round(weird_division(query_pos[0], node_b_x), 8))
                         rel_pos_y = abs(round(weird_division(query_pos[1], node_b_y), 8))
                         query_image = f'{query["point"]}_{query["north"]}'
-                        scene['query'] = {'image': query_image, 'pos_x': rel_pos_x, 'pos_y': rel_pos_y}                        
+                        scene['query'] = {'image': query_image, 'pos_x': rel_pos_x, 'pos_y': rel_pos_y}  
+                        scene['graph'] = g_idx                    
                         self.scenes[e] = scene
 
     def load_pairs(self):
-        self.train_pairs = [] # ATM - from self.scenes, {scene, indices}
+        self.train_pairs, self.val_pairs = [], []
         for s in self.scenes:
             imgs = self.scenes[s]['images']
-            len_img = len(imgs)
-            scene_imgs = []
-            for i_a, img in enumerate(self.scenes[s]['images']):
-                # train_pairs.append([scene, i, scene, i+1])
-                a_rems = imgs[max(0, i_a-2):min(len_img, i_a+3)]
+            node_1, node_2 = self.cities[self.scenes[s]['graph']].edges[s]['nodes'][0], self.cities[self.scenes[s]['graph']].edges[s]['nodes'][-1]
+            edge_angle = calculate_initial_compass_bearing(node_1, node_2)
+
+            for i_a, img in enumerate(imgs):
+                a_rems = imgs[max(0, i_a-2):min(len(imgs), i_a+3)]
                 a_rems.remove(img)
                 for i_an in a_rems:
-                    scene_imgs.append([i_a, i_an])
-            self.train_pairs.append({s: scene_imgs})
-            
+                    self.train_pairs.append({'scene': s, 'imgs': [imgs.index(img), imgs.index(i_an)], 'heading': edge_angle})
 
 
-        # else:
-        #     seq_b = [int(fn[-9:-4]) for fn in self.poses.keys() if 'seq0' not in fn]
-        #     for i_a, anchor in enumerate(seq_a):
-        #         for i_bn in seq_b:
-        #             new_arr.append([0, i_a, 1, i_bn])
+class GraphPoseDataset(data.Dataset):
+    def __init__(self, stage='train') -> None:
+        super().__init__()
+        self.stage = stage
+        self.dataset = GraphDataset()
+        self.transforms = None
+        self.normalise = Compose([ToTensor(), Resize(self.dataset.img_dim), Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+        if stage == 'train': self.pairs = self.dataset.train_pairs
+        else: self.pairs = self.dataset.val_pairs
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, index):
+        pair = self.pairs[index]
+        scene = self.dataset.scenes[pair['scene']]
+        indices = pair['imgs']
+        heading = pair['heading']
+        image_query = np.array(self.dataset.lmdb[scene['images'][indices[0]]].convert('RGB'))
+        image_ref = np.array(self.dataset.lmdb[scene['images'][indices[1]]].convert('RGB'))
+        # Heading Roll
+        query_north = scene['norths'][indices[0]]
+        _, width = image_query.shape[:2]
+        query_north = int((query_north / 360) * width)
+        anchor_angle = int((heading / 360) * width)
+        image_query = np.roll(image_query, query_north, axis=1)
+        image_query = np.roll(image_query, -anchor_angle, axis=1)
+        ref_north = scene['norths'][indices[1]]
+        _, width = image_query.shape[:2]
+        ref_north = int((ref_north / 360) * width)
+        anchor_angle = int((heading / 360) * width)
+        image_ref = np.roll(image_ref, ref_north, axis=1)
+        image_ref = np.roll(image_ref, -anchor_angle, axis=1)
+        # FOV Crop
+        new_half_width = int((width * (self.dataset.fov/360))/2)
+        image_query = image_query[:, (width//2)-new_half_width:(width//2)+new_half_width]
+        image_ref = image_ref[:, (width//2)-new_half_width:(width//2)+new_half_width]
+
+        image_query = self.normalise(image_query)
+        image_ref = self.normalise(image_ref)
+
+        pos_x = scene['pos_x'][indices[0]]
+        pos_y = scene['pos_y'][indices[0]]
+        pose_trans = torch.tensor([pos_x, pos_y, 0], dtype=torch.float32)
+        pose_quart = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+
+        return {'image0': image_query, 'image1': image_ref, 'trans': pose_trans, 'quart': pose_quart}
+
 
 
 
 if __name__ == '__main__':
-    data = GraphDataset()
+    d = GraphPoseDataset()
+    item = d.__getitem__(0)
