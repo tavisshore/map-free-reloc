@@ -29,21 +29,15 @@ def pose_error_torch(R, t, Tgt, reduce=None):
 
     if reduce is None:
         def fn(x): return x
-    elif reduce == 'mean':
-        fn = torch.mean
-    elif reduce == 'median':
-        fn = torch.median
+    elif reduce == 'mean': fn = torch.mean
+    elif reduce == 'median': fn = torch.median
 
     t_ang_err = fn(t_ang_err)
     t_scale_err = fn(t_scale_err)
     t_euclidean_err = fn(t_euclidean_err)
     R_err = fn(R_err)
 
-    errors = {'t_err_ang': t_ang_err,
-              't_err_scale': t_scale_err,
-              't_err_scale_sym': t_scale_err_sym,
-              't_err_euc': t_euclidean_err,
-              'R_err': R_err}
+    errors = {'t_err_ang': t_ang_err, 't_err_scale': t_scale_err, 't_err_scale_sym': t_scale_err_sym, 't_err_euc': t_euclidean_err, 'R_err': R_err}
     return errors
 
 

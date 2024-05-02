@@ -6,6 +6,7 @@ from transforms3d.quaternions import qinverse, qmult, rotate_vector, quat2mat
 import utm 
 import math
 from torchvision.transforms import Compose, ToTensor, Resize, Normalize
+from tqdm import tqdm
 
 if __name__ == '__main__':
     from utils import read_color_image, read_depth_image, correct_intrinsic_scale
@@ -142,24 +143,29 @@ class GGLScene(data.Dataset):
         c1 = rotate_vector(-t1, qinverse(q1))  # center of camera 1 in world coordinates)
         c2 = rotate_vector(-t2, qinverse(q2))  # center of camera 2 in world coordinates)
 
+        # pyth_diff = np.hypot(t2[0], t2[1])
+
         # get 4 x 4 relative pose transformation matrix (from im1 to im2)
         # for test/val set, q1,t1 is the identity pose, so the relative pose matches the absolute pose
         # print(q1, q2)
         q12 = qmult(q2, qinverse(q1))
-
-
         t12 = t2 - rotate_vector(t1, q12)
         T = np.eye(4, dtype=np.float32)
         T[:3, :3] = quat2mat(q12)
         T[:3, -1] = t12
         T = torch.from_numpy(T)
 
+        # return {'image0': image1, 'depth0': depth1, 'image1': image2, 'depth1': depth2, 'T_0to1': T, 'abs_q_0': q1, 
+        #         'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 'K_color0': self.K[im1_path].copy(), 'K_color1': self.K[im2_path].copy(), 
+        #         'dataset_name': 'GGL', 'scene_id': self.scene_root.stem, 'scene_root': str(self.scene_root), 
+        #         'pair_id': index*self.sample_factor, 'pair_names': (im1_path, im2_path), 'sim': 0., 'scene': self.scene, 'inds': pairs,
+        #         'gt': pyth_diff, 't1': t1, 't2': t2}
 
-        return {'image0': image1, 'depth0': depth1, 'image1': image2, 'depth1': depth2, 'T_0to1': T, 'abs_q_0': q1, 
-                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 'K_color0': self.K[im1_path].copy(), 'K_color1': self.K[im2_path].copy(), 
-                'dataset_name': 'GGL', 'scene_id': self.scene_root.stem, 'scene_root': str(self.scene_root), 
-                'pair_id': index*self.sample_factor, 'pair_names': (im1_path, im2_path), 'sim': 0., 'scene': self.scene, 'inds': pairs}
-
+        data_dict = {'image0': image1, 'image1': image2, 'T_0to1': T, 'abs_q_0': q1, 'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2,
+                'K_color0': self.K[im1_path].copy(), 'K_color1': self.K[im2_path].copy(), 'scene_id': self.scene_root.stem, 
+                'scene_root': str(self.scene_root), 'pair_id': index*self.sample_factor, 'pair_names': (im1_path, im2_path), 
+                'scene': self.scene, 'inds': pairs}
+        return data_dict
 
 class GGLDataset(data.ConcatDataset):
     def __init__(self, cfg, mode, transforms=None):
@@ -173,7 +179,6 @@ class GGLDataset(data.ConcatDataset):
         if scenes is None: scenes = [s.name for s in data_root.iterdir() if s.is_dir()]
 
         data_srcs = [GGLScene(data_root / scene, scene, resize, sample_factor, overlap_limits, transforms, estimated_depth, mode) for scene in scenes]
-
         super().__init__(data_srcs)
 
 
@@ -235,9 +240,7 @@ class GraphPoseDataset(data.Dataset):
         super().__init__()
         self.stage = stage
         self.dataset = dataset
-
         resize = (dataset.cfg.DATASET.WIDTH, dataset.cfg.DATASET.HEIGHT)
-
         self.normalise = Compose([ToTensor(), Resize(resize)])#, Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
         if stage == 'train': self.pairs = self.dataset.train_pairs
         else: self.pairs = self.dataset.val_pairs
@@ -245,61 +248,7 @@ class GraphPoseDataset(data.Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    def get_train_item(self, index):
-        pair = self.pairs[index]
-        scene = self.dataset.scenes[pair['scene']]
-        indices = pair['imgs']
-        heading = pair['heading']
-        image_query = np.array(self.dataset.lmdb[scene['images'][indices[0]]].convert('RGB')) # Query, Ref
-        image_ref = np.array(self.dataset.lmdb[scene['images'][indices[1]]].convert('RGB'))
-        # Heading Roll
-        query_north = scene['norths'][indices[0]]
-        _, width = image_query.shape[:2]
-        query_north = int((query_north / 360) * width)
-        anchor_angle = int((heading / 360) * width)
-        image_query = np.roll(image_query, query_north, axis=1)
-        image_query = np.roll(image_query, -anchor_angle, axis=1)
-        ref_north = scene['norths'][indices[1]]
-        _, width = image_query.shape[:2]
-        ref_north = int((ref_north / 360) * width)
-        anchor_angle = int((heading / 360) * width)
-        image_ref = np.roll(image_ref, ref_north, axis=1)
-        image_ref = np.roll(image_ref, -anchor_angle, axis=1)
-        # FOV Crop
-        new_half_width = int((width * (self.dataset.fov/360))/2)
-        image_query = image_query[:, (width//2)-new_half_width:(width//2)+new_half_width]
-        image_ref = image_ref[:, (width//2)-new_half_width:(width//2)+new_half_width]
-
-        image1 = self.normalise(image_query)
-        image2 = self.normalise(image_ref)
-
-        pos_x_1 = scene['pos_x'][indices[0]]
-        pos_y_1 = scene['pos_y'][indices[0]]
-        pos_x_2 = scene['pos_x'][indices[1]]
-        pos_y_2 = scene['pos_y'][indices[1]]
-        t1 = torch.tensor([pos_x_1, pos_y_1, 0], dtype=torch.float32)
-        q1 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
-        t2 = torch.tensor([pos_x_2, pos_y_2, 0], dtype=torch.float32)
-        q2 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
-        # From works code
-        c1 = rotate_vector(-t1, qinverse(q1))  # center of camera 1 in world coordinates)
-        c2 = rotate_vector(-t2, qinverse(q2))  # center of camera 2 in world coordinates)
-        q12 = qmult(q2, qinverse(q1))
-        t12 = t2 - rotate_vector(t1, q12)
-        T = np.eye(4, dtype=np.float32)
-        T[:3, :3] = quat2mat(q12)
-        T[:3, -1] = t12
-        T = torch.from_numpy(T)
-
-
-        # Extra - 590.3821 590.3821 1024 256 512 512
-        # K = np.array([[590.3821, 0, 1024], [0, 590.3821, 256], [0, 0, 1]], dtype=np.float32)
-        K = np.array([[295.191, 0., 511.75], [0., 295.191, 127.75], [0., 0., 1.]], dtype=np.float32) # ESTIMATED
-
-        return {'image0': image1, 'depth0': torch.tensor([]), 'image1': image2, 'depth1': torch.tensor([]), 'T_0to1': T, 'abs_q_0': q1, 
-                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 'K_color0': K, 'K_color1': K, 'scene': pair['scene'], 'pair': pair['imgs']} 
-
-    def get_val_item(self, index):
+    def __getitem__(self, index):
         pair = self.pairs[index]
         scene = self.dataset.scenes[pair['scene']]
         indices = pair['imgs']
@@ -308,14 +257,13 @@ class GraphPoseDataset(data.Dataset):
         query_north = float(query['image'].split('_')[-1])
         image_query = np.array(self.dataset.lmdb[query['image']].convert('RGB'))
         image_ref = np.array(self.dataset.lmdb[scene['images'][indices[0]]].convert('RGB'))
-        # Heading Roll
 
+        # Heading Roll
         _, width = image_query.shape[:2]
         query_north = int((query_north / 360) * width)
         anchor_angle = int((heading / 360) * width)
         image_query = np.roll(image_query, query_north, axis=1)
         image_query = np.roll(image_query, -anchor_angle, axis=1)
-
         ref_north = scene['norths'][indices[0]]
         _, width = image_query.shape[:2]
         ref_north = int((ref_north / 360) * width)
@@ -327,7 +275,6 @@ class GraphPoseDataset(data.Dataset):
         new_half_width = int((width * (self.dataset.fov/360))/2)
         image_query = image_query[:, (width//2)-new_half_width:(width//2)+new_half_width]
         image_ref = image_ref[:, (width//2)-new_half_width:(width//2)+new_half_width]
-
         image1 = self.normalise(image_query)
         image2 = self.normalise(image_ref)
 
@@ -339,9 +286,8 @@ class GraphPoseDataset(data.Dataset):
         q1 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
         t2 = torch.tensor([pos_x_2, pos_y_2, 0], dtype=torch.float32)
         q2 = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
-        # From works code
-        c1 = rotate_vector(-t1, qinverse(q1))  # center of camera 1 in world coordinates)
-        c2 = rotate_vector(-t2, qinverse(q2))  # center of camera 2 in world coordinates)
+        c1 = rotate_vector(-t1, qinverse(q1))
+        c2 = rotate_vector(-t2, qinverse(q2))  
         q12 = qmult(q2, qinverse(q1))
         t12 = t2 - rotate_vector(t1, q12)
         T = np.eye(4, dtype=np.float32)
@@ -350,16 +296,50 @@ class GraphPoseDataset(data.Dataset):
         T = torch.from_numpy(T)
 
         K = np.array([[295.191, 0., 511.75], [0., 295.191, 127.75], [0., 0., 1.]], dtype=np.float32) # ESTIMATED
-
-        return {'image0': image1, 'depth0': torch.tensor([]), 'image1': image2, 'depth1': torch.tensor([]), 'T_0to1': T, 'abs_q_0': q1, 
-                'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 'K_color0': K, 'K_color1': K, 'scene': pair['scene'], 'pair': pair['imgs']} 
-
-    def __getitem__(self, index):
-        if self.stage == 'train': return self.get_train_item(index)
-        else: return self.get_val_item(index)
+        data_dict = {'image0': image1, 'image1': image2, 'T_0to1': T, 'abs_q_0': q1, 'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 
+                'K_color0': K, 'K_color1': K, 'scene': pair['scene'], 'inds': pair['imgs']} 
+        return data_dict     
 
 
 if __name__ == '__main__':
-    dat = GraphDataset()
-    d = GraphPoseDataset(stage='val', dataset=dat)
-    item = d.__getitem__(0)
+    import argparse
+    from default import cfg
+
+    stringer = 'ggl'
+    parser = argparse.ArgumentParser()
+    parser.add_argument('config', default=f'config/regression/{stringer}/3d3d.yaml', help='path to config file')
+    parser.add_argument('dataset_config', default=f'config/{stringer}.yaml', help='path to dataset config file')
+    parser.add_argument('--experiment', help='experiment name', default='default')
+    parser.add_argument('--resume', help='resume from checkpoint path', default=None)
+    args = parser.parse_args([f'config/regression/{stringer}/3d3d.yaml', f'config/{stringer}.yaml', '--experiment', 'default'])
+
+    cfg.merge_from_file(args.dataset_config)
+    cfg.merge_from_file(args.config)
+
+    da = GraphDataset(cfg)
+    dataset = GraphPoseDataset('val', da)
+
+    # 'image0': image1, 'image1': image2, 'T_0to1': T, 'abs_q_0': q1, 'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 
+    # 'K_color0': K, 'K_color1': K, 'scene': pair['scene'], 'pair': pair['imgs']
+    item = dataset.__getitem__(1)
+
+    t_01 = item['T_0to1'] # relative pose 0 to 1?
+    q_0 = item['abs_q_0'] # no rotational difference
+    c_0 = item['abs_c_0'] # image 0 x,y,z
+    q_1 = item['abs_q_1'] # no rotational difference
+    c_1 = item['abs_c_1'] # image 1 x,y,z
+    K_0 = item['K_color0'] # intrinsic matrix
+    K_1 = item['K_color1'] # intrinsic matrix
+    scene = item['scene'] # edge id
+    pair = item['pair'] # reference image index in edge
+
+    print(t_01)
+    print(q_0)
+    print(c_0)
+    print(q_1)
+    print(c_1)
+    print(K_0)
+    print(K_1)
+    print(scene)
+    print(pair)
+

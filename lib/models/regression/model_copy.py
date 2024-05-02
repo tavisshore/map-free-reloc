@@ -1,6 +1,7 @@
 import torch
 import lightning.pytorch as pl
-
+import numpy as np
+import matplotlib.pyplot as plt
 from lib.models.regression.aggregator import *
 from lib.models.regression.head import *
 from lib.models.regression.encoder.resnet import ResNet
@@ -15,7 +16,7 @@ from lib.datasets.sampler import RandomConcatSampler
 from lib.datasets.scannet import ScanNetDataset
 from lib.datasets.sevenscenes import SevenScenesDataset
 from lib.datasets.mapfree import MapFreeDataset
-from lib.datasets.ggl import GGLDataset
+from lib.datasets.ggl import GGLDataset, GraphDataset, GraphPoseDataset
 
 
 class RegressionModel(pl.LightningModule):
@@ -35,9 +36,6 @@ class RegressionModel(pl.LightningModule):
             self.s_r = torch.nn.Parameter(torch.zeros(1))
             self.s_t = torch.nn.Parameter(torch.zeros(1))
 
-        # DATA
-        datasets = {'ScanNet': ScanNetDataset, '7Scenes': SevenScenesDataset, 'MapFree': MapFreeDataset, 'ggl': GGLDataset}
-        self.dataset_type = datasets[cfg.DATASET.DATA_SOURCE]
         self.val_outputs = []
         self.val_scenes = []
 
@@ -51,15 +49,14 @@ class RegressionModel(pl.LightningModule):
     def train_dataloader(self):
         transforms = ColorJitter() if self.cfg.DATASET.AUGMENTATION_TYPE == 'colorjitter' else None
         transforms = Grayscale(num_output_channels=3) if self.cfg.DATASET.BLACK_WHITE else transforms
-        dataset = self.dataset_type(self.cfg, 'train', transforms=transforms)
+        dataset = GGLDataset(self.cfg, 'train', transforms=transforms)
         sampler = self.get_sampler(dataset)
         return DL(dataset, batch_size=self.cfg.TRAINING.BATCH_SIZE, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler)
 
     def val_dataloader(self):
-        dataset = self.dataset_type(self.cfg, 'val')
-        if isinstance(dataset, ScanNetDataset): sampler = self.get_sampler(dataset, reset_epoch=True)
-        else: sampler = None
-        return DL(dataset, batch_size=8, num_workers=self.cfg.TRAINING.NUM_WORKERS, sampler=sampler, drop_last=True)
+        data = GraphDataset(self.cfg)
+        dataset = GraphPoseDataset('val', data)
+        return DL(dataset, batch_size=8, num_workers=1, drop_last=True)
 
     def test_dataloader(self):
         dataset = self.dataset_type(self.cfg, 'test')
@@ -83,28 +80,6 @@ class RegressionModel(pl.LightningModule):
         return R_loss, t_loss, loss
 
     def training_step(self, batch, batch_idx):
-        nan_bool = torch.isnan(batch['abs_c_0'])
-        if nan_bool.any():
-            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
-            nan_inds = torch.unique(nan_inds)
-            for k in batch.keys():
-                for n in nan_inds:
-                    if isinstance(batch[k], torch.Tensor):
-                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
-                    elif isinstance(batch[k], list):
-                        batch[k] = batch[k][:n] + batch[k][n+1:]
-
-        nan_bool = torch.isnan(batch['abs_c_1'])
-        if nan_bool.any():
-            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
-            nan_inds = torch.unique(nan_inds)
-            for k in batch.keys():
-                for n in nan_inds:
-                    if isinstance(batch[k], torch.Tensor):
-                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
-                    elif isinstance(batch[k], list):
-                        batch[k] = batch[k][:n] + batch[k][n+1:]
-
         self(batch)
         R_loss, t_loss, loss = self.loss_fn(batch)
         self.log('train/R_loss', R_loss), self.log('train/t_loss', t_loss), self.log('train/loss', loss)
@@ -112,82 +87,61 @@ class RegressionModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-
-        nan_bool = torch.isnan(batch['abs_c_0'])
-        if nan_bool.any():
-            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
-            nan_inds = torch.unique(nan_inds)
-            for k in batch.keys():
-                for n in nan_inds:
-                    if isinstance(batch[k], torch.Tensor): batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
-                    elif isinstance(batch[k], list): batch[k] = batch[k][:n] + batch[k][n+1:]
-
-        nan_bool = torch.isnan(batch['abs_c_1'])
-        if nan_bool.any():
-            nan_inds = (nan_bool == True).nonzero(as_tuple=True)[0]
-            nan_inds = torch.unique(nan_inds)
-            for k in batch.keys():
-                for n in nan_inds:
-                    if isinstance(batch[k], torch.Tensor):
-                        batch[k] = torch.cat([batch[k][:n], batch[k][n+1:]])
-                    elif isinstance(batch[k], list):
-                        batch[k] = batch[k][:n] + batch[k][n+1:]
-
+        # 'image0': image1, 'image1': image2, 'T_0to1': T, 'abs_q_0': q1, 'abs_c_0': c1, 'abs_q_1': q2, 'abs_c_1': c2, 
+        # 'K_color0': K, 'K_color1': K, 'scene': pair['scene'], 'pair': pair['imgs']
         Tgt = batch['T_0to1']
         R, t = self(batch)
+
         R_loss, t_loss, loss = self.loss_fn(batch)
         outputs = pose_error_torch(R, t, Tgt, reduce=None)
+        inds = batch['inds'][0]
 
+        # reshape t
+        t = t.squeeze(1)
+
+        # Add relative pose estimation to the anchor pose
         for b_idx in range(len(batch['scene'])): 
-            self.val_scenes.append({'scene': batch['scene'][b_idx], 'inds': (batch['inds'][b_idx].detach().cpu().numpy()[1], batch['inds'][b_idx].detach().cpu().numpy()[3]), 
-                                    't_err': outputs['t_err_euc'][b_idx].item(), 'R_err': outputs['R_err'][b_idx].item(), 't_err_ang': outputs['t_err_ang'][b_idx].item(), 
-                                    't_err_scale': outputs['t_err_scale'][b_idx].item(), 't_err_scale_sym': outputs['t_err_scale_sym'][b_idx].item(),
-                                    'T_0to1': Tgt[b_idx]})
-
+            scene = (batch['scene'][0][b_idx].item(), batch['scene'][1][b_idx].item())
+            self.val_scenes.append({'scene': scene, 'inds': inds[b_idx], 't_err': outputs['t_err_euc'][b_idx].item(), 
+                                    't_err_scale': outputs['t_err_scale'][b_idx].item(), 't_err_scale_sym': outputs['t_err_scale_sym'][b_idx].item(), 
+                                    'pose0': batch['abs_c_0'][b_idx].cpu().detach().numpy(), 'pose1': batch['abs_c_1'][b_idx].cpu().detach().numpy(),
+                                    't': t[b_idx].cpu().detach().numpy(), 'R': R[b_idx].cpu().detach().numpy()})
 
     def on_validation_epoch_end(self):
-
-        # final = {scene: {'pairs': [{1: 0.24123, 2: 0.13512}], 'gt': (0.41261, 0.1262)}}
         aggregated = {}
         for v_out in self.val_scenes:
             scene = v_out['scene']
-
             if scene not in aggregated.keys():
-                aggregated[scene] = {'inds': [], 't_err_euc': [], 'R_err': [], 't_err_ang': [], 't_err_scale': [], 't_err_scale_sym': []}
+                aggregated[scene] = {'inds': [], 't_err_euc': [], 't_err_scale': [], 't_err_scale_sym': [], 't': []}
 
             aggregated[scene]['t_err_euc'].append(v_out['t_err'])
-            aggregated[scene]['R_err'].append(v_out['R_err'])
-            aggregated[scene]['t_err_ang'].append(v_out['t_err_ang'])
             aggregated[scene]['t_err_scale'].append(v_out['t_err_scale'])
             aggregated[scene]['t_err_scale_sym'].append(v_out['t_err_scale_sym'])
-            aggregated[scene]['inds'].append(v_out['inds'])
+            aggregated[scene]['inds'].append(v_out['inds'].item())
+            aggregated[scene]['pose0'] = v_out['pose0'] # Query?
+            aggregated[scene]['pose1'] = v_out['pose1'] # Reference?
+            # aggregated[scene]['t'].append(v_out['t'])
 
-        print(aggregated[list(aggregated.keys())[0]])
-                    
-
-
-
-        breakpoint()
-
-        median_t_ang_err = aggregated['t_err_ang'].median()
-        median_t_scale_err = aggregated['t_err_scale'].median()
-        median_t_euclidean_err = aggregated['t_err_euc'].median()
-        median_R_err = aggregated['R_err'].median()
-        mean_R_loss = aggregated['R_loss'].mean()
-        mean_t_loss = aggregated['t_loss'].mean()
-        mean_loss = aggregated['loss'].mean()
-
-        a1, a2, a3 = A_metrics(aggregated['t_err_scale_sym'])
-        AUC_euc_10, AUC_euc_50, AUC_euc_100 = error_auc(aggregated['t_err_euc'].view(-1).detach().cpu().numpy(), [0.1, 0.5, 1.0]).values()
-        pose_error = torch.maximum(aggregated['t_err_ang'].view(-1), aggregated['R_err'].view(-1)).detach().cpu()
-        AUC_pos_5, AUC_pos_10, AUC_pos_20 = error_auc(pose_error.numpy(), [5, 10, 20]).values()
-        rot_error = aggregated['R_err'].view(-1).detach().cpu()
-        AUC_rot_5, AUC_rot_10, AUC_rot_20 = error_auc(rot_error.numpy(), [5, 10, 20]).values()
-        t_ang_error = aggregated['t_err_ang'].view(-1).detach().cpu()
-        AUC_tang_5, AUC_tang_10, AUC_tang_20 = error_auc(t_ang_error.numpy(), [5, 10, 20]).values()
+        for scene in aggregated.keys():
+            plt.subplot(111)
+            t_err_euc = np.array(aggregated[scene]['t_err_euc'])
+            t_err_scale = np.array(aggregated[scene]['t_err_scale'])
+            t_err_scale_sym = np.array(aggregated[scene]['t_err_scale_sym'])
+            plt.plot(t_err_euc, label='t_err_euc')
+            plt.plot(t_err_scale, label='t_err_scale')
+            plt.plot(t_err_scale_sym, label='t_err_scale_sym')
+            pose_1 = aggregated[scene]['pose0']
+            # t = np.array(aggregated[scene]['t'])
+            p1 = np.hypot(pose_1[0], pose_1[1])
+            plt.axvline(x=p1, color='r', linestyle='--')
+            plt.title(f'{scene}')
+            plt.xlabel('Sample')
+            plt.ylabel('Error')
+            plt.legend()
+            plt.savefig(f'plots/{scene}_{self.current_epoch}.png')
+            plt.clf()
 
         self.val_outputs.clear(), self.val_scenes.clear()
-        return mean_loss
 
     def configure_optimizers(self):
         tcfg = self.cfg.TRAINING
