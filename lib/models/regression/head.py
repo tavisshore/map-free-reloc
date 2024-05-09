@@ -109,8 +109,7 @@ class ProcrustesDeepResBlock(DeepResBlock):
 
         self.add_basis = cfg.HEAD.ADD_BASIS
         self.num_pts = cfg.HEAD.NUM_PTS
-        assert self.num_pts == 3 or (self.num_pts % 2 == 0 and self.num_pts >=
-                                     6), 'num_pts must be 3, 6 or a multiple of 2 higher than 6'
+        assert self.num_pts == 3 or (self.num_pts % 2 == 0 and self.num_pts >= 6), 'num_pts must be 3, 6 or a multiple of 2 higher than 6'
 
         self.mlp = torch.nn.Sequential(
             *[

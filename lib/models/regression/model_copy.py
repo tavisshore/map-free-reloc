@@ -29,8 +29,10 @@ class RegressionModel(pl.LightningModule):
         self.encoder = encoder(cfg.ENCODER)
         self.aggregator = aggregator(cfg.AGGREGATOR, self.encoder.num_out_layers)
         self.head = head(cfg, self.aggregator.num_out_layers)
+
         self.rot_loss = eval(cfg.TRAINING.ROT_LOSS)
         self.trans_loss = eval(cfg.TRAINING.TRANS_LOSS)
+        
         self.LAMBDA = cfg.TRAINING.LAMBDA
         if cfg.TRAINING.LAMBDA == 0.:
             self.s_r = torch.nn.Parameter(torch.zeros(1))
@@ -56,11 +58,11 @@ class RegressionModel(pl.LightningModule):
     def val_dataloader(self):
         data = GraphDataset(self.cfg)
         dataset = GraphPoseDataset('val', data)
-        return DL(dataset, batch_size=8, num_workers=1, drop_last=True)
+        return DL(dataset, batch_size=16, num_workers=4, drop_last=True)
 
     def test_dataloader(self):
         dataset = self.dataset_type(self.cfg, 'test')
-        return DL(dataset, batch_size=8, num_workers=1, shuffle=False)
+        return DL(dataset, batch_size=16, num_workers=4, shuffle=False)
 
     def forward(self, data):
         vol0 = self.encoder(data['image0'])
@@ -82,7 +84,7 @@ class RegressionModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         self(batch)
         R_loss, t_loss, loss = self.loss_fn(batch)
-        self.log('train/R_loss', R_loss), self.log('train/t_loss', t_loss), self.log('train/loss', loss)
+        self.log('train/R_loss', R_loss), self.log('train/t_loss', t_loss), self.log('train/loss', loss, prog_bar=True)
         if self.LAMBDA == 0.: self.log('train/s_R', self.s_r), self.log('train/s_t', self.s_t)
         return loss
 
@@ -95,6 +97,7 @@ class RegressionModel(pl.LightningModule):
         R_loss, t_loss, loss = self.loss_fn(batch)
         outputs = pose_error_torch(R, t, Tgt, reduce=None)
         inds = batch['inds'][0]
+        self.log('val/R_loss', R_loss), self.log('val/t_loss', t_loss), self.log('val/loss', loss, prog_bar=True)
 
         # reshape t
         t = t.squeeze(1)
@@ -122,24 +125,24 @@ class RegressionModel(pl.LightningModule):
             aggregated[scene]['pose1'] = v_out['pose1'] # Reference?
             # aggregated[scene]['t'].append(v_out['t'])
 
-        for scene in aggregated.keys():
-            plt.subplot(111)
-            t_err_euc = np.array(aggregated[scene]['t_err_euc'])
-            t_err_scale = np.array(aggregated[scene]['t_err_scale'])
-            t_err_scale_sym = np.array(aggregated[scene]['t_err_scale_sym'])
-            plt.plot(t_err_euc, label='t_err_euc')
-            plt.plot(t_err_scale, label='t_err_scale')
-            plt.plot(t_err_scale_sym, label='t_err_scale_sym')
-            pose_1 = aggregated[scene]['pose0']
-            # t = np.array(aggregated[scene]['t'])
-            p1 = np.hypot(pose_1[0], pose_1[1])
-            plt.axvline(x=p1, color='r', linestyle='--')
-            plt.title(f'{scene}')
-            plt.xlabel('Sample')
-            plt.ylabel('Error')
-            plt.legend()
-            plt.savefig(f'plots/{scene}_{self.current_epoch}.png')
-            plt.clf()
+        # for scene in aggregated.keys():
+        #     plt.subplot(111)
+        #     t_err_euc = np.array(aggregated[scene]['t_err_euc'])
+        #     t_err_scale = np.array(aggregated[scene]['t_err_scale'])
+        #     t_err_scale_sym = np.array(aggregated[scene]['t_err_scale_sym'])
+        #     plt.plot(t_err_euc, label='t_err_euc')
+        #     plt.plot(t_err_scale, label='t_err_scale')
+        #     plt.plot(t_err_scale_sym, label='t_err_scale_sym')
+        #     pose_1 = aggregated[scene]['pose0']
+        #     # t = np.array(aggregated[scene]['t'])
+        #     p1 = np.hypot(pose_1[0], pose_1[1])
+        #     plt.axvline(x=p1, color='r', linestyle='--')
+        #     plt.title(f'{scene}')
+        #     plt.xlabel('Sample')
+        #     plt.ylabel('Error')
+        #     plt.legend()
+        #     plt.savefig(f'plots/{scene}_{self.current_epoch}.png')
+        #     plt.clf()
 
         self.val_outputs.clear(), self.val_scenes.clear()
 

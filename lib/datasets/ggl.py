@@ -194,32 +194,34 @@ class GraphDataset():
     def graph_to_scenes(self):
         self.scenes = {}
         for g_idx, graph in enumerate(self.cities):
-            for e in graph.edges:
-                if len(graph.edges[e]['images']) > 2: # edges have images within
-                    node_a_x, node_a_y = utm.from_latlon(*graph.edges[e]['images'][0]['point'])[:2]
-                    node_b_x, node_b_y = utm.from_latlon(*graph.edges[e]['images'][-1]['point'])[:2]
-                    node_b_x = abs(node_b_x - node_a_x)
-                    node_b_y = abs(node_b_y - node_a_y)
+            for idx, e in enumerate(graph.edges): # TEMPORARILY ONLY USING FIRST EDGE
+                if idx == 0:
 
-                    if node_b_x and node_b_y:
-                        sub_nodes = graph.edges[e]['images']
-                        scene = {'images': [], 'norths': [], 'pos_x': [], 'pos_y': []}
+                    if len(graph.edges[e]['images']) > 2: # edges have images within
+                        node_a_x, node_a_y = utm.from_latlon(*graph.edges[e]['images'][0]['point'])[:2]
+                        node_b_x, node_b_y = utm.from_latlon(*graph.edges[e]['images'][-1]['point'])[:2]
+                        node_b_x = abs(node_b_x - node_a_x)
+                        node_b_y = abs(node_b_y - node_a_y)
 
-                        for node in sub_nodes:
-                            n_pos = np.subtract(utm.from_latlon(*node['point'])[:2], (node_a_x, node_a_y))
-                            rel_pos_x = abs(round(weird_division(n_pos[0], node_b_x), 8))
-                            rel_pos_y = abs(round(weird_division(n_pos[1], node_b_y), 8))
-                            node_image = f'{node["point"]}_{node["north"]}'
-                            scene['images'].append(node_image), scene['pos_x'].append(rel_pos_x), scene['pos_y'].append(rel_pos_y)
-                            scene['norths'].append(node['north'])
-                        query = graph.edges[e]['query']
-                        query_pos = np.subtract(utm.from_latlon(*query['point'])[:2], (node_a_x, node_a_y))
-                        rel_pos_x = abs(round(weird_division(query_pos[0], node_b_x), 8))
-                        rel_pos_y = abs(round(weird_division(query_pos[1], node_b_y), 8))
-                        query_image = f'{query["point"]}_{query["north"]}'
-                        scene['query'] = {'image': query_image, 'pos_x': rel_pos_x, 'pos_y': rel_pos_y}  
-                        scene['graph'] = g_idx                    
-                        self.scenes[e] = scene
+                        if node_b_x and node_b_y:
+                            sub_nodes = graph.edges[e]['images']
+                            scene = {'images': [], 'norths': [], 'pos_x': [], 'pos_y': []}
+
+                            for node in sub_nodes:
+                                n_pos = np.subtract(utm.from_latlon(*node['point'])[:2], (node_a_x, node_a_y))
+                                rel_pos_x = abs(round(weird_division(n_pos[0], node_b_x), 8))
+                                rel_pos_y = abs(round(weird_division(n_pos[1], node_b_y), 8))
+                                node_image = f'{node["point"]}_{node["north"]}'
+                                scene['images'].append(node_image), scene['pos_x'].append(rel_pos_x), scene['pos_y'].append(rel_pos_y)
+                                scene['norths'].append(node['north'])
+                            query = graph.edges[e]['query']
+                            query_pos = np.subtract(utm.from_latlon(*query['point'])[:2], (node_a_x, node_a_y))
+                            rel_pos_x = abs(round(weird_division(query_pos[0], node_b_x), 8))
+                            rel_pos_y = abs(round(weird_division(query_pos[1], node_b_y), 8))
+                            query_image = f'{query["point"]}_{query["north"]}'
+                            scene['query'] = {'image': query_image, 'pos_x': rel_pos_x, 'pos_y': rel_pos_y}  
+                            scene['graph'] = g_idx                    
+                            self.scenes[e] = scene
 
     def load_pairs(self):
         self.train_pairs, self.val_pairs = [], []
@@ -229,11 +231,11 @@ class GraphDataset():
             edge_angle = calculate_initial_compass_bearing(node_1, node_2)
 
             for i_a, img in enumerate(imgs):
-                a_rems = imgs[max(0, i_a-2):min(len(imgs), i_a+3)]
+                a_rems = imgs[max(0, i_a-1):min(len(imgs), i_a+2)]
                 a_rems.remove(img)
                 for i_an in a_rems:
-                    self.train_pairs.append({'scene': s, 'imgs': [imgs.index(img), imgs.index(i_an)], 'heading': edge_angle})
-                self.val_pairs.append({'scene': s, 'imgs': [imgs.index(img)], 'heading': edge_angle})
+                    self.val_pairs.append({'scene': s, 'imgs': [imgs.index(i_an)], 'heading': edge_angle})
+
 
 class GraphPoseDataset(data.Dataset):
     def __init__(self, stage='train', dataset: GraphDataset = None) -> None:

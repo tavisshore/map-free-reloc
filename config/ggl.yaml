@@ -1,7 +1,7 @@
 DATASET:
   DATA_SOURCE: 'ggl'
   DATA_ROOT: 'data/MFR/'
-  SCENES: None  # should be a list [] or None. If none, use all scenes.
+  SCENES: ['s00000']  # should be a list [] or None. If none, use all scenes.
   ESTIMATED_DEPTH: None  # To load estimated depth map, provide the suffix to the depth files, e.g. 'dptnyu', 'dptkiti'
   AUGMENTATION_TYPE: None
   HEIGHT: 256
